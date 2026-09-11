@@ -6,26 +6,31 @@ Code accompanying:
 > Layers in Residual Networks."** ICLR, 2018.
 > https://openreview.net/pdf?id=SyMvJrdaW
 
-WarpNet approximates a wide ResNet by Taylor-expanding a chain of `K`
+WarpNet approximates a wide ResNet by Taylor-expanding a chain of $K$
 consecutive residual units to first order, yielding a "warp operator"
-that computes all `K` units' outputs in parallel from a single shared
-input instead of sequentially. For `K=2` with sub-blocks F1, F2 (each
-BN-Conv-BN-ReLU-Conv-BN):
+that computes all $K$ units' outputs in parallel from a single shared
+input instead of sequentially. For $K = 2$ with sub-blocks $F_1, F_2$
+(each BN-Conv-BN-ReLU-Conv-BN):
 
-    x_out = x + F1(x) + F2(x) + F2'(x)·x
+$$x_{\text{out}} = x + F_1(x) + F_2(x) + F_2'(x)\,x$$
 
-where `F2'(x)` is F2's Jacobian evaluated at `x`, applied to `x` itself
-(the paper's cheaper "WarpNet1" variant, used for all reported CIFAR
-results). Because F1, F2 and F2' only depend on the block's input, they
-can be computed on separate GPUs — that's the "decoupling," and the
-source of WarpNet's speed-up over a plain wide ResNet at comparable
-accuracy. See `pytorch/model.py`'s module docstring for the full
-breakdown, including the approximations the paper makes in computing
-F2' cheaply (dropping BatchNorm from it entirely, approximating ReLU's
-derivative as a sign mask).
+where $F_2'(x)$ is $F_2$'s Jacobian evaluated at $x$, applied to $x$
+itself (the paper's cheaper "WarpNet1" variant, used for all reported
+CIFAR results). Because $F_1$, $F_2$ and $F_2'$ only depend on the
+block's input, they can be computed on separate GPUs — that's the
+"decoupling," and the source of WarpNet's speed-up over a plain wide
+ResNet at comparable accuracy. $K = 3$ extends this with a third
+sub-block:
 
-Model parallelism (splitting F1/F2/F3/F' across GPUs) is supported and
-runs equally well on a single device — see `pytorch/README.md`'s
+$$x_{\text{out}} = x + F_1(x) + F_2(x) + F_3(x) + F_2'(x)\,x + F_3'(x)\,x$$
+
+See `pytorch/model.py`'s module docstring for the full breakdown,
+including the approximations the paper makes in computing $F_2'$ and
+$F_3'$ cheaply (dropping BatchNorm from them entirely, approximating
+ReLU's derivative as a sign mask).
+
+Model parallelism (splitting $F_1/F_2/F_3/F'$ across GPUs) is supported
+and runs equally well on a single device — see `pytorch/README.md`'s
 "Multi-GPU" section.
 
 ## Layout
