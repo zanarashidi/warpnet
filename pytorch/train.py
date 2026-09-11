@@ -1,5 +1,9 @@
 """
-Single-GPU training script for the PyTorch WarpNet port.
+Training script for the PyTorch implementation of WarpNet.
+
+Runs on a single device by default; pass `--devices` to split each
+WarpBlock's F1/F2/(F3) terms across multiple GPUs the way the paper
+does (see the "Multi-GPU" section of the README and `model.WarpBlock`).
 
 Mirrors the original TF training loop (`cifar10_train.py`/`cifar100_train.py`):
 training runs for a fixed number of steps (not epochs), does full
@@ -72,6 +76,12 @@ def parse_args():
 
     p.add_argument("--ckpt_path", default=None, help="checkpoint to resume from")
     p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument(
+        "--devices", default=None,
+        help="comma-separated device list to run each WarpBlock's terms on separate GPUs, "
+             "e.g. 'cuda:0,cuda:1,cuda:2' for warp_factor=2 or 'cuda:0,cuda:1,cuda:2,cuda:3' "
+             "for warp_factor=3. Omit to run everything on one device.",
+    )
     return p.parse_args()
 
 
@@ -123,8 +133,9 @@ def full_validation(model, test_loader, device, criterion):
 
 def main():
     args = parse_args()
-    device = get_device()
-    print(f"Using device: {device}")
+    devices = args.devices.split(",") if args.devices else None
+    device = torch.device(devices[0]) if devices else get_device()
+    print(f"Using device(s): {devices or device}")
 
     train_dir = args.train_dir or f"logs_{args.version}/"
     os.makedirs(train_dir, exist_ok=True)
@@ -142,8 +153,10 @@ def main():
 
     model = WarpNet(
         num_residual_blocks=args.num_residual_blocks, warp_factor=args.warp_factor,
-        k=args.k, num_classes=num_classes,
-    ).to(device)
+        k=args.k, num_classes=num_classes, devices=devices,
+    )
+    if devices is None:
+        model = model.to(device)
     num_params(model)
 
     start_step = 0

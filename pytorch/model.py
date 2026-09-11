@@ -1,12 +1,8 @@
 """
-PyTorch port of WarpNet.
+PyTorch implementation of WarpNet.
 
     Fok, An, Rashidi, Wang. "Decoupling the Layers in Residual Networks."
     ICLR 2018. https://openreview.net/pdf?id=SyMvJrdaW
-
-Ported from the original TensorFlow 1.x implementation
-(`tensorflow/cifar10/parallel_Jumping_k.py`, `tensorflow/cifar100/parallel_Jumping_k.py`,
-forked from https://github.com/wenxinxu/resnet_in_tensorflow) for single-GPU use.
 
 ## What WarpNet actually is
 
@@ -30,7 +26,7 @@ The paper's cheaper **WarpNet1** variant (used for essentially all
 reported CIFAR results) additionally replaces F2'(x1)F1(x1) with
 F2'(x1)x1 — i.e. the Jacobian-vector product is taken against the block's
 own input x1 instead of against F1's output — for a further speed-up
-at similar accuracy. That is what this port implements (matching the
+at similar accuracy. That is what's implemented here (matching the
 original code, which always calls the "grad" branch with `input` as
 the vector, never with F1's output).
 
@@ -120,15 +116,27 @@ class FBlock(nn.Module):
         return self.bn_out(h)
 
     def warp_forward(self, v):
-        """F'(x1) applied to `v`, reusing this block's own conv weights."""
-        flipped1 = self.conv1_weight.flip(2, 3)
+        """
+        F'(x1) applied to `v`, reusing this block's own conv weights. If
+        `v` lives on a different device than the weights (multi-GPU mode,
+        see WarpBlock), a device-local copy of the weights is used for the
+        convolutions -- this is the actual communication cost of sharing
+        F2's weights with a warp term computed on another GPU.
+        """
+        conv1_weight = self.conv1_weight
+        if conv1_weight.device != v.device:
+            conv1_weight = conv1_weight.to(v.device)
+        flipped1 = conv1_weight.flip(2, 3)
         h = F.conv2d(v, flipped1, padding=1)
 
         # Not `h * mask` -- the original code uses the mask itself as the
         # "post-ReLU-derivative" value. See module docstring.
         relu_mask = (h > 0).float()
 
-        flipped2 = self.conv2_weight.flip(2, 3)
+        conv2_weight = self.conv2_weight
+        if conv2_weight.device != v.device:
+            conv2_weight = conv2_weight.to(v.device)
+        flipped2 = conv2_weight.flip(2, 3)
         return F.conv2d(relu_mask, flipped2, padding=1)
 
 
@@ -143,9 +151,16 @@ class WarpBlock(nn.Module):
 
     All F blocks require in_channels == out_channels == `channels`, true
     everywhere this is used in the network.
+
+    :param devices: optional list of device strings/torch.device to run
+        each term on its own GPU, matching the paper's GPU assignment
+        (Tables 2-3): for K=2, `[dev_F1, dev_F2, dev_warp]` (3 devices);
+        for K=3, `[dev_F1, dev_F2, dev_F3, dev_warp]` (4 devices), with
+        both warp terms sharing `dev_warp` as the paper does. `None`
+        (default) runs everything on whatever device `x` arrives on.
     """
 
-    def __init__(self, channels: int, warp_factor: int = 2, survival_rate: float = 1.0):
+    def __init__(self, channels: int, warp_factor: int = 2, survival_rate: float = 1.0, devices=None):
         super().__init__()
         if warp_factor not in (2, 3):
             raise ValueError("warp_factor must be 2 or 3 (matches the original code)")
@@ -157,6 +172,17 @@ class WarpBlock(nn.Module):
         if warp_factor == 3:
             self.F3 = FBlock(channels, channels)
 
+        self.devices = None
+        if devices is not None:
+            expected = 3 if warp_factor == 2 else 4
+            if len(devices) != expected:
+                raise ValueError(f"warp_factor={warp_factor} needs {expected} devices, got {len(devices)}")
+            self.devices = [torch.device(d) for d in devices]
+            self.F1.to(self.devices[0])
+            self.F2.to(self.devices[1])
+            if warp_factor == 3:
+                self.F3.to(self.devices[2])
+
     def _maybe_run(self, fn, x):
         if not self.training or self.survival_rate >= 1.0:
             return fn(x)
@@ -165,12 +191,34 @@ class WarpBlock(nn.Module):
         return torch.zeros_like(x)
 
     def forward(self, x):
+        if self.devices is None:
+            return self._forward_single_device(x)
+        return self._forward_multi_device(x)
+
+    def _forward_single_device(self, x):
         out = x + self._maybe_run(self.F1, x)
         out = out + self._maybe_run(self.F2, x)
         out = out + self._maybe_run(self.F2.warp_forward, x)
         if self.warp_factor == 3:
             out = out + self._maybe_run(self.F3, x)
             out = out + self._maybe_run(self.F3.warp_forward, x)
+        return out
+
+    def _forward_multi_device(self, x):
+        home = x.device
+        d = self.devices
+        warp_device = d[3] if self.warp_factor == 3 else d[2]
+
+        f1_out = self._maybe_run(self.F1, x.to(d[0])).to(home)
+        f2_out = self._maybe_run(self.F2, x.to(d[1])).to(home)
+        f2_warp = self._maybe_run(self.F2.warp_forward, x.to(warp_device)).to(home)
+        out = x + f1_out + f2_out + f2_warp
+
+        if self.warp_factor == 3:
+            f3_out = self._maybe_run(self.F3, x.to(d[2])).to(home)
+            f3_warp = self._maybe_run(self.F3.warp_forward, x.to(warp_device)).to(home)
+            out = out + f3_out + f3_warp
+
         return out
 
 
@@ -189,6 +237,10 @@ class WarpNet(nn.Module):
     :param k: width multiplier (`kw`)
     :param num_classes: 10 for CIFAR-10, 100 for CIFAR-100
     :param survival_rate: see module docstring; kept for completeness, default 1.0
+    :param devices: optional list of device strings/torch.device to run
+        every WarpBlock's terms across multiple GPUs -- see WarpBlock and
+        the "Multi-GPU" section of the README. `None` (default) runs the
+        whole network on a single device.
     """
 
     def __init__(
@@ -198,6 +250,7 @@ class WarpNet(nn.Module):
         k: int = 4,
         num_classes: int = 10,
         survival_rate: float = 1.0,
+        devices=None,
     ):
         super().__init__()
         self.stem = ConvBNReLU(3, 16, stride=1)
@@ -208,21 +261,34 @@ class WarpNet(nn.Module):
 
         def make_stage(channels):
             return nn.ModuleList(
-                [WarpBlock(channels, warp_factor, survival_rate) for _ in range(num_residual_blocks)]
+                [WarpBlock(channels, warp_factor, survival_rate, devices) for _ in range(num_residual_blocks)]
             )
 
         self.stage1 = make_stage(stage1_channels)
         self.stage2 = make_stage(stage2_channels)
         self.stage3 = make_stage(stage3_channels)
 
+        # Stem, pooling and the classifier head stay on a single "primary"
+        # device -- only the F1/F2/(F3) terms inside each WarpBlock are
+        # split across GPUs, matching the paper (which never distributes
+        # anything but the warp operator's own branches).
+        self.primary_device = torch.device(devices[0]) if devices is not None else None
+        if self.primary_device is not None:
+            self.stem.to(self.primary_device)
+
         self.final_bn = nn.BatchNorm2d(stage3_channels, eps=BN_EPSILON)
         self.fc = nn.Linear(stage3_channels, num_classes)
         nn.init.xavier_uniform_(self.fc.weight)
         nn.init.zeros_(self.fc.bias)
+        if self.primary_device is not None:
+            self.final_bn.to(self.primary_device)
+            self.fc.to(self.primary_device)
 
         self.k = k
 
     def forward(self, x):
+        if self.primary_device is not None:
+            x = x.to(self.primary_device)
         out = self.stem(x)
         # conv0's 16 output channels are duplicated k times along the
         # channel axis to seed the first stage at width 16k.
@@ -259,9 +325,16 @@ def num_params(model: nn.Module) -> int:
 if __name__ == "__main__":
     import time
 
-    for warp_factor, num_residual_blocks, label in [(2, 6, "WarpNet1-73-4 (K=2, Nwarp=6)"), (3, 4, "WarpNet1-73-4 (K=3, Nwarp=4)")]:
-        print(f"\n=== {label} ===")
-        model = WarpNet(num_residual_blocks=num_residual_blocks, warp_factor=warp_factor, k=4, num_classes=10)
+    configs = [(2, 6, "WarpNet1-73-4 (K=2, Nwarp=6)"), (3, 4, "WarpNet1-73-4 (K=3, Nwarp=4)")]
+
+    num_gpus = torch.cuda.device_count()
+    for warp_factor, num_residual_blocks, label in configs:
+        needed = 3 if warp_factor == 2 else 4
+        devices = [f"cuda:{i}" for i in range(needed)] if num_gpus >= needed else None
+        tag = f"{needed}-GPU" if devices else "single-device"
+        print(f"\n=== {label} [{tag}] ===")
+
+        model = WarpNet(num_residual_blocks=num_residual_blocks, warp_factor=warp_factor, k=4, num_classes=10, devices=devices)
         num_params(model)
 
         x = torch.randn(128, 3, 32, 32)

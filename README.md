@@ -24,16 +24,19 @@ breakdown, including the approximations the paper makes in computing
 F2' cheaply (dropping BatchNorm from it entirely, approximating ReLU's
 derivative as a sign mask).
 
+Model parallelism (splitting F1/F2/F3/F' across GPUs) is supported and
+runs equally well on a single device — see `pytorch/README.md`'s
+"Multi-GPU" section.
+
 ## Layout
 
-- **`pytorch/`** — a modern, single-GPU-friendly PyTorch port. This is
-  the recommended way to use or extend the model today. See
-  `pytorch/README.md`.
+- **`pytorch/`** — the PyTorch implementation. This is the recommended
+  way to use or extend the model today. See `pytorch/README.md`.
 - **`archive/tensorflow/`** — the original TensorFlow 1.1.0 implementation
   used to produce the paper's results (`cifar10/` = the K=2 config,
-  `cifar100/` = the K=3 config). Kept for reproducibility, not
-  recommended for new work — see `archive/tensorflow/README.md` for how
-  to run it (requires CUDA 8, TF 1.1.0, and 3-4 GPUs).
+  `cifar100/` = the K=3 config). Kept for reproducibility — see
+  `archive/tensorflow/README.md` for how to run it (requires CUDA 8,
+  TF 1.1.0, and 3-4 GPUs).
 
 ## Citation
 
