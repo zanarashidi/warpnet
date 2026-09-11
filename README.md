@@ -3,7 +3,7 @@
 Code accompanying:
 
 > Ricky Fok, Aijun An, Zana Rashidi, Xiaogang Wang. **"Decoupling the
-> Layers in Residual Networks."** ICLR Workshop, 2018.
+> Layers in Residual Networks."** ICLR, 2018.
 > https://openreview.net/pdf?id=SyMvJrdaW
 
 WarpNet approximates a wide ResNet by Taylor-expanding a chain of `K`

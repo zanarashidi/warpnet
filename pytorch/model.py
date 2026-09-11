@@ -2,7 +2,7 @@
 PyTorch port of WarpNet.
 
     Fok, An, Rashidi, Wang. "Decoupling the Layers in Residual Networks."
-    ICLR Workshop 2018. https://openreview.net/pdf?id=SyMvJrdaW
+    ICLR 2018. https://openreview.net/pdf?id=SyMvJrdaW
 
 Ported from the original TensorFlow 1.x implementation
 (`tensorflow/cifar10/parallel_Jumping_k.py`, `tensorflow/cifar100/parallel_Jumping_k.py`,
